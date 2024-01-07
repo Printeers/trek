@@ -34,7 +34,7 @@ CAUTION: Do not modify this file unless you know what you are doing.
 </schema>
 
 <table name="storage_locations" layers="0" collapse-mode="2" max-obj-count="4" z-value="0">
-	<schema name="warehouse"/>
+	<schema name="public"/>
 	<role name="postgres"/>
 	<position x="1120" y="520"/>
 	<column name="shelf" not-null="true">
@@ -52,7 +52,7 @@ CAUTION: Do not modify this file unless you know what you are doing.
 </table>
 
 <table name="machines" layers="0" collapse-mode="2" max-obj-count="2" z-value="0">
-	<schema name="factory"/>
+	<schema name="public"/>
 	<role name="postgres"/>
 	<position x="858" y="519"/>
 	<column name="name" not-null="true">

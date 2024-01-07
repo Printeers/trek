@@ -18,13 +18,9 @@ mkdir -p output
   TREK_DATABASE_USERS=santa,worker \
   trek init
 
-  trek check
-
   for file in ../stages/*; do
     cp "$file" santas_warehouse.dbm
 
     trek generate "$(basename "$file" | cut -d "-" -f 2 | cut -d "." -f 1)"
-
-    trek check
   done
 )

@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v4/stdlib"
+	"github.com/stripe/pg-schema-diff/pkg/diff"
+	"github.com/stripe/pg-schema-diff/pkg/tempdb"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -242,19 +245,6 @@ func runWithStdout(
 		return fmt.Errorf("failed to check if model has been updated: %w", err)
 	}
 	if updated {
-		targetPostgres, targetConn, _, err := setupDatabase(ctx, tmpDir, "target", 5432)
-		defer func() {
-			if targetConn != nil {
-				_ = targetConn.Close(ctx)
-			}
-			if targetPostgres != nil {
-				_ = targetPostgres.Stop()
-			}
-		}()
-		if err != nil {
-			return fmt.Errorf("failed to setup target database: %w", err)
-		}
-
 		migratePostgres, migrateConn, _, err := setupDatabase(ctx, tmpDir, "migrate", 5433)
 		defer func() {
 			if migrateConn != nil {
@@ -272,10 +262,8 @@ func runWithStdout(
 			ctx,
 			config,
 			wd,
-			tmpDir,
 			migrationsDir,
 			initial,
-			targetConn,
 			migrateConn,
 		)
 		if err != nil {
@@ -345,19 +333,6 @@ func runWithFile(
 			}
 		}
 
-		targetPostgres, targetConn, _, err := setupDatabase(ctx, tmpDir, "target", 5432)
-		defer func() {
-			if targetConn != nil {
-				_ = targetConn.Close(ctx)
-			}
-			if targetPostgres != nil {
-				_ = targetPostgres.Stop()
-			}
-		}()
-		if err != nil {
-			return false, fmt.Errorf("failed to setup target database: %w", err)
-		}
-
 		migratePostgres, migrateConn, _, err := setupDatabase(ctx, tmpDir, "migrate", 5433)
 		defer func() {
 			if migrateConn != nil {
@@ -375,10 +350,8 @@ func runWithFile(
 			ctx,
 			config,
 			wd,
-			tmpDir,
 			migrationsDir,
 			migrationNumber == 1,
-			targetConn,
 			migrateConn,
 		)
 		if err != nil {
@@ -462,10 +435,8 @@ func generateMigrationStatements(
 	ctx context.Context,
 	config *internal.Config,
 	wd,
-	tmpDir,
 	migrationsDir string,
 	initial bool,
-	targetConn,
 	migrateConn *pgx.Conn,
 ) (string, error) {
 	log.Println("Generating migration statements")
@@ -493,14 +464,9 @@ func generateMigrationStatements(
 		return "", fmt.Errorf("failed to create migrate users: %w", err)
 	}
 
-	err = internal.CreateUsers(ctx, targetConn, config.DatabaseUsers)
+	targetSQL, err := os.ReadFile(filepath.Join(wd, fmt.Sprintf("%s.sql", config.ModelName)))
 	if err != nil {
-		return "", fmt.Errorf("failed to create target users: %w", err)
-	}
-
-	err = executeTargetSQL(ctx, config, wd, targetConn)
-	if err != nil {
-		return "", fmt.Errorf("failed to execute target sql: %w", err)
+		return "", fmt.Errorf("failed to read target sql: %w", err)
 	}
 
 	if initial {
@@ -520,42 +486,41 @@ func generateMigrationStatements(
 		return "", fmt.Errorf("failed to execute migrate sql: %w", err)
 	}
 
-	statements, err := internal.Migra(internal.DSN(migrateConn, "disable"), internal.DSN(targetConn, "disable"))
+	// The tempDbFactory is used in plan generation to extract the new schema and validate the plan
+	tempDbFactory, err := tempdb.NewOnInstanceFactory(ctx, func(ctx context.Context, dbName string) (*sql.DB, error) {
+		copiedConfig := migrateConn.Config().Copy()
+		copiedConfig.Database = dbName
+		return openDbWithPgxConfig(copiedConfig)
+	})
 	if err != nil {
-		return "", fmt.Errorf("failed to run migra: %w", err)
+		panic("Generating the TempDbFactory failed")
 	}
+	defer tempDbFactory.Close()
 
-	// Filter stuff from go-migrate that doesn't exist in the target db, and we don't have and need anyway
-	filter := []string{
-		"alter table \"public\".\"schema_migrations\" drop constraint \"schema_migrations_pkey\";\n\n",
-		"drop index if exists \"public\".\"schema_migrations_pkey\";\n\n",
-		"drop table \"public\".\"schema_migrations\";\n\n",
-	}
-	for _, f := range filter {
-		statements = strings.ReplaceAll(statements, f, "")
-	}
-	statements = strings.Trim(statements, "\n")
-
-	extraStatements, err := generateMissingPermissionStatements(ctx, tmpDir, statements, targetConn, migrateConn)
+	db, err := openDbWithPgxConfig(migrateConn.Config())
 	if err != nil {
-		return "", fmt.Errorf("failed to generate missing permission statements: %w", err)
+		panic("Generating the TempDbFactory failed")
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		panic("Generating the TempDbFactory failed")
 	}
 
-	var output string
-	if statements != "" {
-		output += statements
-	}
-	if statements != "" && extraStatements != "" {
-		output += "\n\n"
-	}
-	if extraStatements != "" {
-		output += "-- Statements generated automatically, please review:\n" + extraStatements
-	}
-	if output != "" {
-		output += "\n"
+	plan, err := diff.GeneratePlan(ctx, conn, tempDbFactory, []string{string(targetSQL)}, diff.WithDataPackNewTables())
+	if err != nil {
+		panic("Generating the plan failed")
 	}
 
-	return output, nil
+	var statements []string
+	for _, statement := range plan.Statements {
+		stmt := statement.ToSQL()
+		if stmt == "DROP TABLE \"schema_migrations\";" {
+			continue
+		}
+		statements = append(statements, stmt)
+	}
+
+	return strings.Join(statements, "\n"), nil
 }
 
 func executeMigrateSQL(migrationsDir string, migrateConn *pgx.Conn) error {
@@ -571,86 +536,11 @@ func executeMigrateSQL(migrationsDir string, migrateConn *pgx.Conn) error {
 	return nil
 }
 
-func executeTargetSQL(ctx context.Context, config *internal.Config, wd string, targetConn *pgx.Conn) error {
-	targetSQL, err := os.ReadFile(filepath.Join(wd, fmt.Sprintf("%s.sql", config.ModelName)))
-	if err != nil {
-		return fmt.Errorf("failed to read target sql: %w", err)
+func openDbWithPgxConfig(config *pgx.ConnConfig) (*sql.DB, error) {
+	connPool := stdlib.OpenDB(*config)
+	if err := connPool.Ping(); err != nil {
+		connPool.Close()
+		return nil, err
 	}
-
-	_, err = targetConn.Exec(ctx, string(targetSQL))
-	if err != nil {
-		return fmt.Errorf("failed to execute target sql: %w", err)
-	}
-
-	return nil
-}
-
-func generateMissingPermissionStatements(
-	ctx context.Context,
-	tmpDir,
-	statements string,
-	targetConn,
-	migrateConn *pgx.Conn,
-) (string, error) {
-	_, err := migrateConn.Exec(ctx, statements)
-	if err != nil {
-		return "", fmt.Errorf("failed to apply generated migration: %w", err)
-	}
-
-	pgDumpOptions := []string{
-		"--schema-only",
-		"--exclude-table=public.schema_migrations",
-	}
-
-	targetDump, err := internal.PgDump(internal.DSN(targetConn, "disable"), pgDumpOptions)
-	if err != nil {
-		//nolint:wrapcheck
-		return "", err
-	}
-
-	migrateDump, err := internal.PgDump(internal.DSN(migrateConn, "disable"), pgDumpOptions)
-	if err != nil {
-		//nolint:wrapcheck
-		return "", err
-	}
-
-	targetDumpFile := filepath.Join(tmpDir, "target.sql")
-	err = os.WriteFile(targetDumpFile, []byte(targetDump), 0o600)
-	if err != nil {
-		return "", fmt.Errorf("failed to write target.sql file: %w", err)
-	}
-
-	migrateDumpFile := filepath.Join(tmpDir, "migrate.sql")
-	err = os.WriteFile(migrateDumpFile, []byte(migrateDump), 0o600)
-	if err != nil {
-		return "", fmt.Errorf("failed to write migrate.sql file: %w", err)
-	}
-
-	diffCmd := exec.Command(
-		"diff",
-		"--minimal",
-		"--unchanged-line-format=",
-		"--old-line-format=",
-		"--new-line-format=%L",
-		migrateDumpFile,
-		targetDumpFile,
-	)
-	diffCmd.Stderr = os.Stderr
-
-	output, err := diffCmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if !(errors.As(err, &ee) && ee.ExitCode() != 0) {
-			return "", fmt.Errorf("failed to run diff: %w %s", err, string(output))
-		}
-	}
-
-	var lines []string
-	for _, line := range strings.Split(string(output), "\n") {
-		if strings.HasPrefix(line, "ALTER ") {
-			lines = append(lines, line)
-		}
-	}
-
-	return strings.Join(lines, "\n"), nil
+	return connPool, nil
 }

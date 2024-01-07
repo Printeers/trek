@@ -27,26 +27,6 @@ func NewPostgresDatabase(runtimePath string, port uint32) (postgres *embeddedpos
 	), fmt.Sprintf("postgres://postgres:postgres@127.0.0.1:%d/postgres", port)
 }
 
-func PgDump(dsn string, args []string) (string, error) {
-	cmd := []string{
-		"pg_dump",
-		"--dbname",
-		dsn,
-	}
-	cmd = append(cmd, args...)
-
-	//nolint:gosec
-	cmdPgDump := exec.Command(cmd[0], cmd[1:]...)
-	cmdPgDump.Stderr = os.Stderr
-
-	stdout, err := cmdPgDump.Output()
-	if err != nil {
-		return "", fmt.Errorf("failed to run pg_dump: %w", err)
-	}
-
-	return string(stdout), nil
-}
-
 func PsqlFile(dsn, file string) error {
 	cmdPsql := exec.Command(
 		"psql",

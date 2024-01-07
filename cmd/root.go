@@ -4,7 +4,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/printeers/trek/internal"
-	"github.com/printeers/trek/internal/embedded/migra"
 )
 
 func NewRootCommand() *cobra.Command {
@@ -16,10 +15,6 @@ func NewRootCommand() *cobra.Command {
 		},
 	}
 
-	rootCmd.PersistentFlags().BoolVar(
-		&migra.ForceEmbedded,
-		"force-embedded-migra", false,
-		"Force using the embedded migra binary instead of the system one.")
 	rootCmd.AddCommand(NewApplyCommand())
 	rootCmd.AddCommand(NewCheckCommand())
 	rootCmd.AddCommand(NewGenerateCommand())

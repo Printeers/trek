@@ -1,12 +1,10 @@
-create table "factory"."machines" (
-    "name" text not null,
-    "toys_produced" bigint not null
+CREATE TABLE "machines" (
+	"toys_produced" bigint NOT NULL,
+	"name" text COLLATE "pg_catalog"."default" NOT NULL
 );
-
-
-create table "warehouse"."storage_locations" (
-    "shelf" bigint not null,
-    "total_capacity" bigint not null,
-    "used_capacity" bigint not null,
-    "current_toy_type" text not null
+CREATE TABLE "storage_locations" (
+	"shelf" bigint NOT NULL,
+	"total_capacity" bigint NOT NULL,
+	"used_capacity" bigint NOT NULL,
+	"current_toy_type" text COLLATE "pg_catalog"."default" NOT NULL
 );
